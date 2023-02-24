@@ -96,14 +96,28 @@ process_output :: (instance: *Cluster_Instance) -> bool {
 }
 
 maybe_log :: (instance: *Cluster_Instance, builder: *String_Builder, buffer: [] u8, bytes: int, to_standard_error: bool) {
-    // @ToDO: check for newline in buffer, prepend cluster instance, etc.
-    log(instance, builder, to_standard_error);
+    buffer_string := cast(string) buffer;
+    buffer_string.count = bytes;
+    last_newline_index := find_index_from_right(buffer_string, #char "\n");
+    if last_newline_index == -1 return;
+
+    partial_line_length := buffer_string.count - last_newline_index - 1;
+
+    // @Speed: This is wasteful. We need a better buffer where we can just move stuff around instead of re-allocating
+    everything := builder_to_string(builder, allocator = temp);
+    lines_string := slice(everything, 0, everything.count - partial_line_length - 1); // Omit the final newline
+    partial_line := slice(everything, everything.count - partial_line_length, partial_line_length);
+    if partial_line append(builder, partial_line);
+
+    log_lines(instance, lines_string, to_standard_error);
 }
 
-log :: (instance: *Cluster_Instance, builder: *String_Builder, to_standard_error: bool) {
-    message := builder_to_string(builder, allocator = temp);
-    if !message return;
-    log("[%]: %", instance.id, message, flags = ifx to_standard_error then Log_Flags.ERROR else 0);
+log_lines :: (instance: *Cluster_Instance, lines_string: string, to_standard_error: bool) {
+    if !lines_string return;
+    lines := split(lines_string, cast(u8) #char "\n");
+    for lines {
+        log("[%]: %", instance.id, it, flags = ifx to_standard_error then Log_Flags.ERROR else 0);
+    }
 }
 
 finish :: (instance: *Cluster_Instance, kill: bool, reap: bool, exit_timeout_ms := 10000) {
@@ -149,8 +163,8 @@ finish :: (instance: *Cluster_Instance, kill: bool, reap: bool, exit_timeout_ms 
     deinit(*instance.process);
 
     // Log whatever remained unlogged
-    log(instance, *instance.output_builder, to_standard_error = false);
-    log(instance, *instance.error_builder,  to_standard_error = true);
+    log_lines(instance, builder_to_string(*instance.output_builder, allocator = temp), to_standard_error = false);
+    log_lines(instance, builder_to_string(*instance.error_builder, allocator = temp),  to_standard_error = true);
 
     reset(instance);
 }
@@ -160,4 +174,5 @@ finish :: (instance: *Cluster_Instance, kill: bool, reap: bool, exit_timeout_ms 
 #import "Basic";
 #import "Command_Line";
 #import "Process";
+#import "String";
 #import "System";
