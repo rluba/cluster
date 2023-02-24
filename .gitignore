@@ -1,0 +1,7 @@
+.build/
+*.swp
+*.obj
+*.pdb
+.DS_Store
+*.dSYM
+cluster
