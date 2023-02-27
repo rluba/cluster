@@ -158,7 +158,12 @@ send_socket :: (ipc: Socket, socket_to_send: Socket, buffer: [] u8) -> success: 
     message_header.msg_control = *control_message;
     message_header.msg_controllen = size_of(type_of(control_message));
 
-    size := repeat_if_interrupted(sendmsg(ipc, *message_header, 0));
+        
+    flags: MSG;
+    #if OS == .LINUX {
+        flags |= .NOSIGNAL;
+    }
+    size := repeat_if_interrupted(sendmsg(ipc, *message_header, flags));
     if size != buffer.count {
         error_value, error_string := System.get_error_value_and_string();
         log_error("Could not send socket: % %", error_value, error_string);

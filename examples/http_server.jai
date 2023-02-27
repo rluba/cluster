@@ -7,9 +7,12 @@ main :: () {
     socket := cluster_listen(INADDR_ANY, port);
     if socket == INVALID_SOCKET exit(1);
 
-    log("Waiting for connections on port %", port);
-    num_clients := 0;
-    while num_clients < 2 {
+    random_seed(cast(u64) (to_microseconds(current_time_consensus())));
+
+    num_clients: u64 = 0;
+    max_clients := random_get() % 10;
+    log("Accepting % connections on port %", max_clients, port);
+    while num_clients < max_clients {
         client_socket, client_addr := cluster_accept(socket);
         if client_socket == INVALID_SOCKET {
             error_code := get_last_socket_error();
@@ -33,4 +36,4 @@ main :: () {
 #import "Socket";
 #import "System";
 #import,file "../module.jai";
-
+#import "Random";

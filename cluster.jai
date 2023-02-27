@@ -20,7 +20,7 @@ Cluster_Socket :: struct {
     
     Instance_Socket :: struct {
         instance_id: int;
-        sockets: [2] Socket; // @ToDo: Only save the first socket once we have a way of delayed-closing sockets we’ve sent to clients // @ToDo: Only save the first socket once we have a way of delayed-closing sockets we’ve sent to clients
+        socket: Socket;
     }
 }
 
@@ -33,6 +33,8 @@ reset :: (instance: *Cluster_Instance) {
     for * cluster_sockets {
         close_instance_socket(it, instance);
         if !it.instance_sockets {
+            log("Closing parent socket % due to lack of cluster instances.", it.socket);
+            remove_handle(*wait_group, it.socket);
             close(it.socket);
             remove it;
         }
@@ -152,7 +154,6 @@ handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Clus
         if bytes_read == 0 && is_eof {
             instance.process.output.eof = true;
         }
-        log("Instance % stdout eof status: % -> %", instance.id, is_eof, instance.process.output.eof);
         success = read_success;
     } else if handle == instance.process.error.handle {
         buffer := ensure_contiguous_space_and_return_available_range(*instance.error_builder);
@@ -162,7 +163,6 @@ handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Clus
         if bytes_read == 0 && is_eof {
             instance.process.error.eof = true;
         }
-        log("Instance % stderr eof status: % -> %", instance.id, is_eof, instance.process.error.eof);
         success = read_success;
     } else {
         assert(false);
@@ -205,7 +205,11 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
             s := cluster_listen(message.address, message.port);
             if s == INVALID_SOCKET {
                 error_code := errno();
-                bytes_sent := repeat_if_interrupted(send(handle, *error_code, size_of(type_of(error_code)), 0));
+                flags: MSG;
+                #if OS == .LINUX {
+                    flags |= .NOSIGNAL;
+                }
+                bytes_sent := repeat_if_interrupted(send(handle, *error_code, size_of(type_of(error_code)), flags));
                 if bytes_sent != size_of(type_of(error_code)) {
                     error_value, error_string := System.get_error_value_and_string();
                     log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
@@ -219,7 +223,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
             cluster_socket.address = message.address;
             cluster_socket.port = message.port;
             cluster_socket.socket = s;
-            success := add_handles(*wait_group, null, handle_socket_event, s);
+            success := add_handles(*wait_group, null, handle_cluster_socket_event, s);
             if !success {
                 error_value, error_string := System.get_error_value_and_string();
                 log_error("Could not add socket to wait group: % %", error_value, error_string);
@@ -231,7 +235,11 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         for cluster_socket.instance_sockets {
             if it.instance_id == instance.id {
                 error_code: s32 = EADDRINUSE;
-                bytes_sent := repeat_if_interrupted(send(handle, *error_code, size_of(type_of(error_code)), 0));
+                flags: MSG;
+                #if OS == .LINUX {
+                    flags |= .NOSIGNAL;
+                }
+                bytes_sent := repeat_if_interrupted(send(handle, *error_code, size_of(type_of(error_code)), flags));
                 if bytes_sent != size_of(type_of(error_code)) {
                     error_value, error_string := System.get_error_value_and_string();
                     log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
@@ -251,6 +259,20 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
             return;
         }
 
+        #if OS == .MACOS {
+            set: s32 = 1;
+            result = setsockopt(sockets[0], SOL_SOCKET, SO_NOSIGPIPE, *set, size_of(type_of(set)));
+            if result == -1 {
+                error_value, error_string := System.get_error_value_and_string();
+                log_error("Could not set socket options: error % %", error_value, error_string);
+                finish(instance, kill = true, reap = true);
+                return;
+            }
+        }
+
+        // @ToDo @Speed: Postponse closing until we’ve received an ACK, but don’t block until we’ve received the ACK
+        defer close(sockets[1]);
+
         dummy: [1] u8;
         success := send_socket(handle, sockets[1], dummy);
         if !success {
@@ -261,7 +283,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
 
         entry: Cluster_Socket.Instance_Socket;
         entry.instance_id = instance.id;
-        entry.sockets = sockets;
+        entry.socket = sockets[0];
         array_add(*cluster_socket.instance_sockets, entry);
         log("Added cluster instance % to socket for %:%", instance.id, message.address, message.port);
     } else {
@@ -270,7 +292,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
     }
 }
 
-handle_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, data: *void) {
+handle_cluster_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, data: *void) {
     // log("Received event on socket %", handle, flags = .VERBOSE_ONLY);
     cluster_socket: *Cluster_Socket;
     for * cluster_sockets {
@@ -280,8 +302,9 @@ handle_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, data: *vo
         }
     }
     if !cluster_socket {
-        log_error("Could not find cluster instance for socket %", s32);
-        // @ToDo: Remove the server socket!
+        log_error("Could not find cluster instance for socket %", handle);
+        close(handle);
+        remove_handle(group, handle);
         return;
     }
 
@@ -304,10 +327,10 @@ handle_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, data: *vo
         address_buffer: [] u8;
         address_buffer.data = xx *address;
         address_buffer.count = size_of(type_of(address));
-        success := send_socket(entry.sockets[0], client_socket, address_buffer);
+        success := send_socket(entry.socket, client_socket, address_buffer);
         if success return;
 
-        log_error("Could not send accepted socket to cluster instance %", entry.instance_id);
+        // log_error("Could not send accepted socket to cluster instance %", entry.instance_id);
         // @Stability: This is dangerous if we have more than one instance with the same ID (eg. when reloading)
         instance := *instances[entry.instance_id - 1];
         assert(instance.id == entry.instance_id);

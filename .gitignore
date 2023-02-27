@@ -6,3 +6,4 @@
 *.dSYM
 cluster
 examples/crashing
+examples/http_server
