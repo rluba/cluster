@@ -1,12 +1,13 @@
 // @ToDo:
 // - graceful shutdown on SIGINT
-// - timeout for old instances to stop
 // - ready-signal from instances
 // - maybe increase/decrease instance count
+// - start a timer event when we kill the old generation so that we don’t have to wait for other events to occur to check shutdown_timeout_ms
 
 Args :: struct {
     n: int = 1;
     working_directory: string;
+    shutdown_timeout_ms: u32 = 30_000;
 }
 
 Instance_Id :: struct {
@@ -120,6 +121,17 @@ main :: () {
         for legacy_instances {
             if maybe_reap_instance(it) {
                 remove it;
+                continue;
+            }
+
+            if it.shutdown_start != APOLLO_TIME_INVALID {
+                elapsed_ms := to_milliseconds(current_time_consensus() - it.shutdown_start);
+                if elapsed_ms > args.shutdown_timeout_ms {
+                    log_error("Cluster instance % failed to stop within %ms. Killing it.", it.id, args.shutdown_timeout_ms);
+                    finish(it, kill = true, reap = true);
+                    remove it;
+                    continue;
+                }
             }
         }
 

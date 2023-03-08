@@ -1,17 +1,30 @@
+Args :: struct {
+    port: u16;
+    noint: bool;
+}
 main :: () {
-    port: u16 = 80;
+    success, args, is_set, command_args := parse_arguments(Args, (Default_Argument_Flags | .SHOW_HELP_ON_ERROR) & ~.FREE_ARGUMENTS_ALLOWED);
+    if !success exit(1);
 
     log("Starting http server");
     if !cluster_init() exit(1);
 
-    socket := cluster_listen(INADDR_ANY, port);
+    if args.noint {
+        log("Ignoring SIGINT events");
+        sa: sigaction_t;
+        sa.sa_handler = SIG_IGN;
+        sigemptyset(*sa.sa_mask);
+        sigaction(SIGINT, *sa, null);
+    }
+
+    socket := cluster_listen(INADDR_ANY, args.port);
     if socket == INVALID_SOCKET exit(1);
 
     random_seed(cast(u64) (to_microseconds(current_time_consensus())));
 
     num_clients: u64 = 0;
     max_clients := random_get() % 10;
-    log("Accepting % connections on port %", max_clients, port);
+    log("Accepting % connections on port %", max_clients, args.port);
     while num_clients < max_clients {
         client_socket, client_addr := cluster_accept(socket);
         if client_socket == INVALID_SOCKET {
@@ -32,6 +45,7 @@ main :: () {
 }
 
 #import "Basic";
+#import "Command_Line";
 #import "POSIX";
 #import "Socket";
 #import "System";
