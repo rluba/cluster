@@ -1,5 +1,5 @@
 Args :: struct {
-    port: u16;
+    port: u16 = 80;
     noint: bool;
 }
 main :: () {

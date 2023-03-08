@@ -1,5 +1,4 @@
 // @ToDo:
-// - graceful shutdown on SIGINT
 // - ready-signal from instances
 // - maybe increase/decrease instance count
 // - start a timer event when we kill the old generation so that we don’t have to wait for other events to occur to check shutdown_timeout_ms
@@ -41,6 +40,7 @@ Cluster_Socket :: struct {
     }
 }
 
+should_quit := false;
 current_generation := 0;
 wait_for_new_generation := false;
 
@@ -96,12 +96,15 @@ main :: () {
     if !success exit(1);
 
     sa: sigaction_t;
-    sa.sa_handler = SIG_IGN;
+    // Instead of ignoring, we have to define a no-op signal handler because SIG_IGN is inherited by child processes, but signal handlers are not
+    // WTF, fork(), really?!?!
+    sa.sa_handler = ignore_signal;
     sigemptyset(*sa.sa_mask);
+    sa.sa_flags = SA_ONSTACK | SA_RESTART;
     sigaction(SIGUSR1, *sa, null);
-    // sigaction(SIGINT, *sa, null);
+    sigaction(SIGINT, *sa, null);
     // @ToDo: Listen for children dying (SIGCHLD?) so we don’t have to wait for other events to realize that someone has died
-    add_signals(*wait_group, null, handle_signal, SIGUSR1);
+    add_signals(*wait_group, null, handle_signal, SIGINT, SIGUSR1);
 
     wanted_instance_count := args.n;
 
@@ -116,8 +119,7 @@ main :: () {
         <<it = instance;
     }
 
-    should_quit := false;
-    while !should_quit {
+    while true {
         for legacy_instances {
             if maybe_reap_instance(it) {
                 remove it;
@@ -134,6 +136,7 @@ main :: () {
                 }
             }
         }
+        if should_quit && !legacy_instances break;
 
         for instances {
             maybe_reap_instance(it);
@@ -179,11 +182,14 @@ main :: () {
         if !success {
             error_value, error_string := System.get_error_value_and_string();
             log_error("Couldn’t wait for events. Exiting…");
-            should_quit = true;
+            exit(1);
         }
     }
 
     deinit(*wait_group);
+}
+
+ignore_signal :: (signal: s32) #c_call {
 }
 
 maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
@@ -205,6 +211,12 @@ maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
 handle_signal :: (group: *Wait_Group, signal: s32, data: *void) {
     if signal == {
         case SIGUSR1;
+            if should_quit {
+                log_error("Ignoring SIGUSR1 because we’re already trying to shut down.");
+                return;
+            }
+
+            log("Received SIGUSR1. Reloading cluster…");
             current_generation += 1;
             // * Move the old processes into a "legacy" array
             array_add(*legacy_instances, ..instances);
@@ -218,6 +230,36 @@ handle_signal :: (group: *Wait_Group, signal: s32, data: *void) {
 
             // * Wait for the new cluster instances to come online
             wait_for_new_generation = true;
+        case SIGINT;
+            if should_quit {
+                log_error("Received another SIGINT while shutting down. Exiting.");
+                exit(1);
+            } else {
+                log_error("Received SIGINT. Shutting down…");
+                should_quit = true;
+                array_add(*legacy_instances, ..instances);
+                array_resize(*instances, 0);
+                stop_legacy_instances();
+            }
+
+        case; log_error("Received unexpected signal: %", signal);
+    }
+}
+
+stop_legacy_instances :: () {
+    for legacy_instances {
+        if it.process.pid && it.shutdown_start == APOLLO_TIME_INVALID {
+            close_instance_sockets(it);
+
+            log("Sending SIGINT to cluster instance %", it.id, flags = .VERBOSE_ONLY);
+            it.shutdown_start = current_time_consensus();
+            result := kill(it.process.pid, SIGINT);
+            if result != 0 {
+                error_value, error_string := System.get_error_value_and_string();
+                log_error("Could not send SIGINT to cluster instance %: % %", it.id, error_value, error_string);
+                finish(it, kill = true, reap = true);
+            }
+        }
     }
 }
 
@@ -365,20 +407,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
             // Also we would start killing the old onces too early if the child has to listen to more than one socket before it’s ready.
             log("First instance from generation % came online. Stopping old generation.", instance.id.generation, flags = .VERBOSE_ONLY);
             wait_for_new_generation = false;
-            for legacy_instances {
-                if it.process.pid && it.shutdown_start == APOLLO_TIME_INVALID {
-                    close_instance_sockets(it);
-
-                    log("Sending SIGINT to cluster instance %", it.id, flags = .VERBOSE_ONLY);
-                    it.shutdown_start = current_time_consensus();
-                    result := kill(it.process.pid, SIGINT);
-                    if result != 0 {
-                        error_value, error_string := System.get_error_value_and_string();
-                        log_error("Could not send SIGINT to cluster instance %: % %", it.id, error_value, error_string);
-                        finish(instance, kill = true, reap = true);
-                    }
-                }
-            }
+            stop_legacy_instances();
         }
     } else {
         // Must be a close on the cluster_socket IPC?
