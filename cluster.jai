@@ -1,6 +1,6 @@
 // @ToDo:
-// - reloading instances
-// - graceful shutdown
+// - graceful shutdown on SIGINT
+// - timeout for old instances to stop
 // - ready-signal from instances
 // - maybe increase/decrease instance count
 
@@ -9,11 +9,22 @@ Args :: struct {
     working_directory: string;
 }
 
+Instance_Id :: struct {
+    generation: int;
+    id:         int;
+}
+
+operator == :: inline (a: Instance_Id, b: Instance_Id) -> bool {
+    return a.generation == b.generation && a.id == b.id;
+}
+
 Cluster_Instance :: struct {
-    id:             int;
+    id:             Instance_Id;
     process:        Process;
     output_builder: String_Builder;
     error_builder:  String_Builder;
+
+    shutdown_start: Apollo_Time = APOLLO_TIME_INVALID;
 }
 
 Cluster_Socket :: struct {
@@ -22,19 +33,29 @@ Cluster_Socket :: struct {
     socket:              Socket = INVALID_SOCKET;
     instance_sockets:    [..] Instance_Socket;
     next_instance_index: int;
-    
+
     Instance_Socket :: struct {
-        instance_id: int;
-        socket: Socket;
+        instance_id: Instance_Id;
+        socket:      Socket;
     }
 }
 
+current_generation := 0;
+wait_for_new_generation := false;
+
 wait_group: Wait_Group;
-instances: [] Cluster_Instance; // Change this to a bucket array if we ever want to dynamically adjust this. Don’t use a dynamic array because we pass pointers to Cluster_Instance around!
+instances: [..] *Cluster_Instance;
 cluster_sockets: Bucket_Array(Cluster_Socket, 8);
 
+legacy_instances: [..] *Cluster_Instance;
 
 reset :: (instance: *Cluster_Instance) {
+    close_instance_sockets(instance);
+
+    instance.process = .{};
+}
+
+close_instance_sockets :: (instance: *Cluster_Instance) {
     for * cluster_sockets {
         close_instance_socket(it, instance);
         if !it.instance_sockets {
@@ -45,8 +66,6 @@ reset :: (instance: *Cluster_Instance) {
             remove it;
         }
     }
-
-    instance.process = .{};
 }
 
 close_instance_socket :: (cs: *Cluster_Socket, instance: *Cluster_Instance) {
@@ -75,32 +94,37 @@ main :: () {
     success = init(*wait_group);
     if !success exit(1);
 
+    sa: sigaction_t;
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(*sa.sa_mask);
+    sigaction(SIGUSR1, *sa, null);
+    // sigaction(SIGINT, *sa, null);
+    // @ToDo: Listen for children dying (SIGCHLD?) so we don’t have to wait for other events to realize that someone has died
+    add_signals(*wait_group, null, handle_signal, SIGUSR1);
+
     wanted_instance_count := args.n;
 
     log("Creating a cluster of % instances of: %", wanted_instance_count, get_quoted_command_string(command_args));
 
     exit_on_failure := true;
 
-    instances = NewArray(wanted_instance_count, Cluster_Instance);
+    array_resize(*instances, wanted_instance_count);
     for * instances {
-        it.id = it_index + 1;
+        instance := New(Cluster_Instance);
+        instance.id = .{current_generation, it_index + 1};
+        <<it = instance;
     }
 
     should_quit := false;
     while !should_quit {
-        for * instances {
-            if it.process.pid && it.process.output.eof && it.process.error.eof {
-                log("Cluster instance % closed its pipes", it.id, flags = .VERBOSE_ONLY);
-                success, process_result := get_process_result(*it.process, 0);
-                if !success {
-                    log_error("Could not check status of cluster instance %.", it.id);
-                    finish(it, kill = true, reap = false); // reaping has failed, no need to try again?
-                } else if process_result.type != .STILL_RUNNING {
-                    log_error("Cluster instance % seems to have stopped. Result: %", it.id, process_result);
-                    finish(it, kill = false, reap = false);
-                }
-                // @ToDo: Maybe only give it a certain time to exit after EOF and kill if it doesn’t respond?
+        for legacy_instances {
+            if maybe_reap_instance(it) {
+                remove it;
             }
+        }
+
+        for instances {
+            maybe_reap_instance(it);
 
             if !it.process.pid {
                 log("Starting cluster instance %…", it.id);
@@ -150,6 +174,41 @@ main :: () {
     deinit(*wait_group);
 }
 
+maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
+    if !instance.process.pid || !instance.process.output.eof || !instance.process.error.eof return false;
+
+    // log("Cluster instance % closed its pipes", instance.id, flags = .VERBOSE_ONLY);
+    success, process_result := get_process_result(*instance.process, 0);
+    if !success {
+        log_error("Could not check status of cluster instance %.", instance.id);
+        finish(instance, kill = true, reap = false); // reaping has failed, no need to try again?
+    } else if process_result.type != .STILL_RUNNING {
+        log_error("Cluster instance % seems to have stopped. Result: %", instance.id, process_result);
+        finish(instance, kill = false, reap = false);
+    }
+    // @ToDo: Maybe only give it a certain time to exit after EOF and kill if it doesn’t respond?
+    return true;
+}
+
+handle_signal :: (group: *Wait_Group, signal: s32, data: *void) {
+    if signal == {
+        case SIGUSR1;
+            current_generation += 1;
+            // * Move the old processes into a "legacy" array
+            array_add(*legacy_instances, ..instances);
+
+            // * Start up a new set of cluster instances
+            for * instances {
+                instance := New(Cluster_Instance);
+                instance.id = .{current_generation, it_index + 1};
+                <<it = instance;
+            }
+
+            // * Wait for the new cluster instances to come online
+            wait_for_new_generation = true;
+    }
+}
+
 handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster_Instance) {
     success := false;
     if handle == instance.process.output.handle {
@@ -197,6 +256,12 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         assert(bytes_received == message_size, "Received unexpected number of IPC bytes from cluster instance %: % vs %", instance.id, bytes_received, message_size);
         log("Received listen from cluster instance %: %:%", instance.id, message.address, message.port);
 
+        if (instance.id.generation != current_generation) {
+            // This generation is supposed to shut down, not start listening on new sockets
+            send_error(instance, EIO);
+            return;
+        }
+
         cluster_socket: *Cluster_Socket;
         found := false;
         for * cluster_sockets {
@@ -210,17 +275,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
             log("Creating new socket in the cluster parent for %:%", message.address, message.port);
             s := cluster_listen(message.address, message.port);
             if s == INVALID_SOCKET {
-                error_code := errno();
-                flags: MSG;
-                #if OS == .LINUX {
-                    flags |= .NOSIGNAL;
-                }
-                bytes_sent := repeat_if_interrupted(send(handle, *error_code, size_of(type_of(error_code)), flags));
-                if bytes_sent != size_of(type_of(error_code)) {
-                    error_value, error_string := System.get_error_value_and_string();
-                    log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
-                    finish(instance, kill = true, reap = true);
-                }
+                send_error(instance, errno());
                 return;
             }
 
@@ -237,7 +292,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
                 return;
             }
         }
-        
+
         for cluster_socket.instance_sockets {
             if it.instance_id == instance.id {
                 error_code: s32 = EADDRINUSE;
@@ -292,9 +347,43 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         entry.socket = sockets[0];
         array_add(*cluster_socket.instance_sockets, entry);
         log("Added cluster instance % to socket for %:%", instance.id, message.address, message.port);
+        if wait_for_new_generation {
+            // @ToDo: We should introduce a "ready" signal from the children instead of implicitly assuming that children are ready on first listen
+            // Otherwise we never stop old instances if the child process doesn’t listen on anything.
+            // Also we would start killing the old onces too early if the child has to listen to more than one socket before it’s ready.
+            log("First instance from generation % came online. Stopping old generation.", instance.id.generation, flags = .VERBOSE_ONLY);
+            wait_for_new_generation = false;
+            for legacy_instances {
+                if it.process.pid && it.shutdown_start == APOLLO_TIME_INVALID {
+                    close_instance_sockets(it);
+
+                    log("Sending SIGINT to cluster instance %", it.id, flags = .VERBOSE_ONLY);
+                    it.shutdown_start = current_time_consensus();
+                    result := kill(it.process.pid, SIGINT);
+                    if result != 0 {
+                        error_value, error_string := System.get_error_value_and_string();
+                        log_error("Could not send SIGINT to cluster instance %: % %", it.id, error_value, error_string);
+                        finish(instance, kill = true, reap = true);
+                    }
+                }
+            }
+        }
     } else {
         // Must be a close on the cluster_socket IPC?
         log("Pretending to handle cluster socket IPC event on intstance %: % %", instance.id, handle, is_eof);
+    }
+
+    send_error :: (instance: *Cluster_Instance, error_code: s32) {
+        flags: MSG;
+        #if OS == .LINUX {
+            flags |= .NOSIGNAL;
+        }
+        bytes_sent := repeat_if_interrupted(send(instance.process.input.handle, *error_code, size_of(type_of(error_code)), flags));
+        if bytes_sent != size_of(type_of(error_code)) {
+            error_value, error_string := System.get_error_value_and_string();
+            log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
+            finish(instance, kill = true, reap = true);
+        }
     }
 }
 
@@ -336,9 +425,8 @@ handle_cluster_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, d
         success := send_socket(entry.socket, client_socket, address_buffer);
         if success return;
 
-        // log_error("Could not send accepted socket to cluster instance %", entry.instance_id);
-        // @Stability: This is dangerous if we have more than one instance with the same ID (eg. when reloading)
-        instance := *instances[entry.instance_id - 1];
+        log_error("Could not send accepted socket to cluster instance %", entry.instance_id);
+        instance := find_instance(entry.instance_id);
         assert(instance.id == entry.instance_id);
         finish(instance, kill = true, reap = true);
 
@@ -396,7 +484,7 @@ finish :: (instance: *Cluster_Instance, kill: bool, reap: bool, exit_timeout_ms 
                 kill_process(*instance.process);
                 process_result = .{type = .EXITED, exit_code = 1};
                 break;
-            } 
+            }
 
             if process_result.type != .STILL_RUNNING     break;
 
@@ -426,6 +514,32 @@ finish :: (instance: *Cluster_Instance, kill: bool, reap: bool, exit_timeout_ms 
     log_lines(instance, builder_to_string(*instance.error_builder, allocator = temp),  to_standard_error = true);
 
     reset(instance);
+}
+
+find_instance :: (id: Instance_Id) -> *Cluster_Instance {
+    for instances {
+        if it.id == id return it;
+    }
+    for legacy_instances {
+        if it.id == id return it;
+    }
+
+    // Something very bad happened
+    builder: String_Builder;
+    append(*builder, "current: [");
+    for instances {
+        if it_index append(*builder, ", ");
+        print_to_builder(*builder, "%", it.id);
+    }
+    append(*builder, "], legacy: [");
+    for legacy_instances {
+        if it_index append(*builder, ", ");
+        print_to_builder(*builder, "%", it.id);
+    }
+    append(*builder, "]");
+    log_error("Could not find cluster instance %. Instances: %", id, builder_to_string(*builder, allocator = temp));
+    assert(false);
+    return null;
 }
 
 #load "wait.jai";
