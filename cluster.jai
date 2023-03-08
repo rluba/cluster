@@ -1,3 +1,8 @@
+// @ToDo:
+// - reloading instances
+// - graceful shutdown
+// - ready-signal from instances
+// - maybe increase/decrease instance count
 
 Args :: struct {
     n: int = 1;
@@ -36,6 +41,7 @@ reset :: (instance: *Cluster_Instance) {
             log("Closing parent socket % due to lack of cluster instances.", it.socket);
             remove_handle(*wait_group, it.socket);
             close(it.socket);
+            array_free(it.instance_sockets);
             remove it;
         }
     }
