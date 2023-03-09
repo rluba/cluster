@@ -64,7 +64,7 @@ init :: (group: *Wait_Group) -> success: bool {
 
 deinit :: (group: *Wait_Group) {
     #if OS == .LINUX {
-        free(group.poll_fds);
+        array_free(group.poll_fds);
         group.poll_fds = null;
         for signal, handle: signals_by_handle {
             close_and_reset_fd(handle);
@@ -275,17 +275,11 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
 
     #if OS == .LINUX {
         poll_timeout_ms := cast(s32) timeout_ms;
-        num_events := poll(group.poll_fds.data, cast(u64) group.poll_fds.count, poll_timeout_ms);
+        num_events := repeat_if_interrupted(poll(group.poll_fds.data, cast(u64) group.poll_fds.count, poll_timeout_ms));
         if num_events == -1 {
-            error_code := System.get_error_value();
-            if error_code == EINTR || error_code == EAGAIN {
-                // Got interrupted, try again.
-                return true;
-            }
-
-            error_string := System.get_error_string(error_code);
-            log_error("Couldn't poll events: % %", error_code, error_string);
-            return false, 0, 0;
+            error_value, error_string := System.get_error_value_and_string();
+            log_error("Couldn't poll events: % %", error_value, error_string);
+            return false;
         }
 
         for i: 0..group.poll_fds.count-1 {
