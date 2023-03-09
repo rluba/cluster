@@ -25,7 +25,7 @@ cluster_init :: () -> bool {
     return true;
 }
 
-cluster_listen :: (address: u32, port: u16) -> Socket {
+cluster_listen :: (address: u32, port: u16) -> Socket, error_code: s32 {
     if is_cluster_instance {
         message: Message_Listen;
         message.address = address;
@@ -36,14 +36,14 @@ cluster_listen :: (address: u32, port: u16) -> Socket {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
             log_error("Couldn’t send listen message: % %", error_code, error_string);
-            return INVALID_SOCKET;
+            return INVALID_SOCKET, error_code;
         }
 
         buffer: [4] u8;
-        success, socket, bytes_received := receive_socket(cluster_socket, buffer);
-        if !success return INVALID_SOCKET;
+        success, socket, bytes_received, error_code := receive_socket(cluster_socket, buffer);
+        if !success return INVALID_SOCKET, error_code;
 
-        return socket;
+        return socket, 0;
     } else {
         // Do the normal socket stuff
         // @ToDo: IPv6
@@ -53,7 +53,7 @@ cluster_listen :: (address: u32, port: u16) -> Socket {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
             log_error("Couldn’t create socket: % %", error_code, error_string);
-            return INVALID_SOCKET;
+            return INVALID_SOCKET, error_code;
         }
 
         reuse_addr: s32 = 1;
@@ -63,7 +63,7 @@ cluster_listen :: (address: u32, port: u16) -> Socket {
             error_string := System.get_error_string(error_code);
             log_error("Couldn’t set socket options: % %", error_code, error_string);
             close_and_reset(*s);
-            return INVALID_SOCKET;
+            return INVALID_SOCKET, error_code;
         }
 
         result = bind(s, address, port);
@@ -72,7 +72,7 @@ cluster_listen :: (address: u32, port: u16) -> Socket {
             error_string := System.get_error_string(error_code);
             log_error("Couldn’t bind socket: % %", error_code, error_string);
             close_and_reset(*s);
-            return INVALID_SOCKET;
+            return INVALID_SOCKET, error_code;
         }
 
         result = listen(s, SOMAXCONN);
@@ -81,10 +81,10 @@ cluster_listen :: (address: u32, port: u16) -> Socket {
             error_string := System.get_error_string(error_code);
             log_error("Couldn’t listen on socket: % %", error_code, error_string);
             close_and_reset(*s);
-            return INVALID_SOCKET;
+            return INVALID_SOCKET, error_code;
         }
 
-        return s;
+        return s, 0;
     }
 }
 
@@ -127,7 +127,7 @@ Control_Message_Socket :: struct {
         socket: Socket;
     }
 }
-#assert(size_of(Control_Message_Socket) == CMSG_LEN(size_of(type_of(Control_Message_Socket.data))));
+#assert(size_of(Control_Message_Socket) == CMSG_SIZE(size_of(type_of(Control_Message_Socket.data))));
 
 repeat_if_interrupted :: (call: Code) -> s64 #expand {
     while true {
@@ -158,7 +158,7 @@ send_socket :: (ipc: Socket, socket_to_send: Socket, buffer: [] u8) -> success: 
     message_header.msg_control = *control_message;
     message_header.msg_controllen = size_of(type_of(control_message));
 
-        
+
     flags: MSG;
     #if OS == .LINUX {
         flags |= .NOSIGNAL;
@@ -172,16 +172,20 @@ send_socket :: (ipc: Socket, socket_to_send: Socket, buffer: [] u8) -> success: 
 
     confirmation: u8;
     bytes_received := repeat_if_interrupted(recv(ipc, *confirmation, 1, 0));
-    if bytes_received != 1 {
+    if bytes_received == -1 {
         error_value, error_string := System.get_error_value_and_string();
         log_error("Could not read IPC ACK: % %", error_value, error_string);
+        return false;
+    }
+    if bytes_received != 1 {
+        log_error("Could not read IPC ACK. Received % bytes", bytes_received);
         return false;
     }
 
     return true;
 }
 
-receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_received: s64 {
+receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_received: s64, error_code: s32 {
     assert(buffer.count >= size_of(s32));
     read_value: OS_Error_Code;
     iov: iovec;
@@ -197,11 +201,11 @@ receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_rec
 
     // We’ll either receive a dummy message with ancillary data or we’ll receive an error code without ancillary data.
     bytes_received := repeat_if_interrupted(recvmsg(s, *message_header, 0));
-    // log("Socket bytes received: %, header: %", bytes_received, message_header);
+    log("Socket bytes received: %, header: %", bytes_received, message_header);
     if bytes_received == -1 {
         error_value, error_string := System.get_error_value_and_string();
         log_error("Could not receive from cluster parent: % %", error_value, error_string);
-        return false, INVALID_SOCKET, -1;
+        return false, INVALID_SOCKET, -1, error_value;
     }
 
     received := CMSG_FIRSTHDR(*message_header);
@@ -210,16 +214,18 @@ receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_rec
         if received.cmsg_level != SOL_SOCKET || received.cmsg_type != cast(s32) SCM.RIGHTS {
             error_value, error_string := System.get_error_value_and_string();
             log_error("Could not parse socket handle from cluster parent: % %", error_value, error_string);
-            return false, INVALID_SOCKET, bytes_received;
+            return false, INVALID_SOCKET, bytes_received, error_value;
         }
 
         if received.cmsg_len < size_of(type_of(control_message)) {
             log_error("Socket message from the child is too small");
-            return false, INVALID_SOCKET, bytes_received;
+            return false, INVALID_SOCKET, bytes_received, -1;
         }
 
         received_message := cast(*Control_Message_Socket) received;
         socket := received_message.socket;
+
+        log("Received socket! Sending ACK");
 
         // Doesn’t matter what we write, it’s just to tell the parent that we’ve received the handle, so it can close it in its process and proceed.
         bytes_sent := repeat_if_interrupted(send(s, *read_value, 1, 0));
@@ -227,25 +233,27 @@ receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_rec
             error_value, error_string := System.get_error_value_and_string();
             log_error("Could not send ACK to cluster parent: % %", error_value, error_string);
             close(socket);
-            return false, INVALID_SOCKET, bytes_received;
+            return false, INVALID_SOCKET, bytes_received, error_value;
         }
 
-        return true, socket, bytes_received;
+        log("Sent ACK");
+
+        return true, socket, bytes_received, 0;
     } else {
         if bytes_received == 0 {
-            return true, INVALID_SOCKET, 0;
+            return true, INVALID_SOCKET, 0, 0;
         }
 
         // No ancillary data, so this must be an error code:
         if bytes_received != size_of(s32) {
             log_error("Received neither control message nor an error code from the cluster parent");
-            return false, INVALID_SOCKET, 0;
+            return false, INVALID_SOCKET, 0, -1;
         }
 
         error_value := read_value;
         error_string := System.get_error_string(error_value);
         log_error("Could not receive socket: % %", error_value, error_string);
-        return false, INVALID_SOCKET, 0;
+        return false, INVALID_SOCKET, 0, error_value;
     }
 }
 

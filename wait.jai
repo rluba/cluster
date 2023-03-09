@@ -65,11 +65,12 @@ init :: (group: *Wait_Group) -> success: bool {
 deinit :: (group: *Wait_Group) {
     #if OS == .LINUX {
         array_free(group.poll_fds);
-        group.poll_fds = null;
-        for signal, handle: signals_by_handle {
-            close_and_reset_fd(handle);
+        group.poll_fds.data = null;
+        for signal, handle: group.signals_by_handle {
+            close(handle);
         }
-        uninit(*signals_by_handle);
+        deinit(*group.signals_by_handle);
+        group.signals_by_handle.entries.data = null;
     } else {
         #assert(OS == .MACOS);
         close_and_reset_fd(*group.kevent_queue);
@@ -85,9 +86,9 @@ deinit :: (group: *Wait_Group) {
 
 add_handles :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Group, handle: s32, is_eof: bool, data: *T), handles: .. s32) -> success: bool {
     #if OS == .LINUX {
-        array_reserve(*group.poll_fds, *group.poll_fds.count + handles.count);
+        array_reserve(*group.poll_fds, group.poll_fds.count + handles.count);
         for handles {
-            fd: poll_fds;
+            fd: pollfd;
             fd.fd = it;
             fd.events = POLLIN;
             array_add(*group.poll_fds, fd);
@@ -119,14 +120,23 @@ add_handles :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Gro
 
 add_signals :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Group, signal: s32, data: *T), signals: ..s32) -> success: bool {
     #if OS == .LINUX {
-        handles := NewArray(signals.count, s32, allocator = temp);
+        array_reserve(*group.poll_fds, group.poll_fds.count + signals.count);
         for signals {
-            handle := create_signal_handle(it);
-            handles[it_index] = handle;
+            handle, success := create_signal_handle(it);
+            if !success {
+                // @ToDo: Close and remove handles already created
+                return false;
+            }
+
+            log("Created handle % for signal %", handle, it);
+
             table_add(*group.signals_by_handle, handle, it);
+
+            fd: pollfd;
+            fd.fd = handle;
+            fd.events = POLLIN;
+            array_add(*group.poll_fds, fd);
         }
-        success := add_handles(group, .. handles);
-        if !success return false;
     } else {
         #assert(OS == .MACOS); // @Incomplete
         events := NewArray(signals.count, Kevent64, allocator = temp);
@@ -157,9 +167,17 @@ add_user_event :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_
     event_id: User_Event_Id;
 
     #if OS == .LINUX {
-        // @Incomplete: use eventfd
-        assert(false);
-        return false, 0;
+        event_id = eventfd(0, 0);
+        if event_id == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not create user event handle: % %", error_code, error_string);
+            return false, 0;
+        }
+
+        fd: pollfd;
+        fd.fd = event_id;
+        fd.events = POLLIN;
+        array_add(*group.poll_fds, fd);
     } else {
         #assert(OS == .MACOS); // @Incomplete
         {
@@ -191,10 +209,16 @@ add_user_event :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_
 }
 
 trigger_user_event :: (group: *Wait_Group, event_id: User_Event_Id) -> success: bool {
+    assert(table_find_pointer(*group.user_handlers, event_id) != null, "event_id % is not a user event", event_id);
     #if OS == .LINUX {
-        // @Incomplete: use eventfd
-        assert(false);
-        return false;
+        value: u64 = 1;
+        size := size_of(type_of(value));
+        result := write(cast(s32) event_id, *value, cast(u64) size);
+        if result != size {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not write to user event %: % %", event_id, error_code, error_string);
+            return false;
+        }
     } else {
         #assert(OS == .MACOS); // @Incomplete
 
@@ -218,14 +242,8 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
     table_remove(*group.fd_handlers, handle);
 
     #if OS == .LINUX {
-        for handles {
-            if it.fd == handle {
-                remove it;
-                return true;
-            }
-        }
-        log_error("Could not find handle % to remove it from the watch group.", handle);
-        return false;
+        success := remove_poll_handle(group, handle);
+        if !success return false;
     } else {
         events: [1] Kevent64;
         events[0].ident = cast(u64) handle;
@@ -246,12 +264,20 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
 // @ToDo: remove_signal
 
 remove_user_event :: (group: *Wait_Group, event_id: User_Event_Id) -> success: bool {
-    table_remove(*group.user_handlers, event_id);
+    found := table_remove(*group.user_handlers, event_id);
+    assert(found, "Could not find user event %", event_id);
 
     #if OS == .LINUX {
-        // @Incomplete: use eventfd
-        assert(false);
-        return false;
+        handle := cast(s32) event_id;
+        result := close(handle);
+        if result == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not close user event %: % %", event_id, error_code, error_string);
+            return false;
+        }
+
+        success := remove_poll_handle(group, handle);
+        if !success return false;
     } else {
         events: [1] Kevent64;
         events[0].ident = event_id;
@@ -268,8 +294,19 @@ remove_user_event :: (group: *Wait_Group, event_id: User_Event_Id) -> success: b
 
     return true;
 }
+#if OS == .LINUX {
+    remove_poll_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
+        for group.poll_fds {
+            if it.fd == handle {
+                remove it;
+                return true;
+            }
+        }
+        log_error("Could not find handle % to remove it from the watch group.", handle);
+        return false;
+    }
+}
 
-// @Hack: replace is_signal with a separate" on_signal event handler?
 wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
     success := true;
 
@@ -285,21 +322,50 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
         for i: 0..group.poll_fds.count-1 {
             it := group.poll_fds[i];
             handle := it.fd;
+            if !it.revents continue;
 
             if it.revents & POLLNVAL {
                 log_error("Handle % reported invalid value: %", handle, it);
                 success = false;
             }
 
-            signal := table_find_pointer(group.signals_by_handle, handle);
+            signal := table_find_pointer(*group.signals_by_handle, handle);
             if signal {
-                handler := table_find_pointer(group.signal_handlers, signal);
-                if handler handler.callback(group, signal, handler.data);
+                log("Signal event: % -> %", handle, <<signal);
+                // Clear the signal event by reading
+                had_info := false;
+                while true {
+                    info: signalfd_siginfo;
+                    bytes_read := repeat_if_interrupted(read(handle, *info, size_of(type_of(info))));
+                    if bytes_read == -1 {
+                        error_value := errno();
+                        if error_value != EAGAIN && error_value != EWOULDBLOCK {
+                            error_string := System.get_error_string(error_value);
+                            log_error("Could not read signal info from handle % for signal %: % %", handle, <<signal, error_value, error_string);
+                            success = false;
+                        }
+                        break;
+                    }
+                    had_info = true;
+                }
+
+                if had_info {
+                    handler := table_find_pointer(*group.signal_handlers, <<signal);
+                    if handler handler.callback(group, <<signal, handler.data);
+                } else {
+                    log_error("Received signal event but there was no signal info to read.");
+                    success = false;
+                }
             } else {
-                // @Incomplete: user event handlers!
-                is_eof := (it.revents & POLLHUP) != 0;
-                handler := table_find_pointer(group.fd_handlers, handle);
-                if handler handler.callback(group, handle, is_ef, handler.data);
+                event_id := cast(User_Event_Id) handle;
+                handler := table_find_pointer(*group.user_handlers, event_id);
+                if handler {
+                    handler.callback(group, event_id, handler.data);
+                } else {
+                    is_eof := (it.revents & POLLHUP) != 0;
+                    handler := table_find_pointer(*group.fd_handlers, handle);
+                    if handler handler.callback(group, handle, is_eof, handler.data);
+                }
             }
         }
     } else {
@@ -378,10 +444,17 @@ close_and_reset_fd :: (fd: *s32, loc := #caller_location) {
         if result == -1 {
             error_code, error_string := System.get_error_value_and_string();
             log_error("Couldn’t set sigprocmask for event %: % %", signal, error_code, error_string);
-            return HANDLE_INVALID, false;
+            return -1, false;
         }
 
-        return signalfd(-1, *sig_mask, 0), true;
+        handle := signalfd(-1, *sig_mask, SFD_NONBLOCK);
+        if handle == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not create signal handle for signal %: % %", signal, error_code, error_string);
+            return -1, false;
+        }
+
+        return handle, true;
     }
 } else #if OS == .MACOS {
     #import "macos";

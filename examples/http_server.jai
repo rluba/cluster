@@ -1,10 +1,19 @@
 Args :: struct {
     port: u16 = 80;
     noint: bool;
+    debug: bool;
 }
 main :: () {
     success, args, is_set, command_args := parse_arguments(Args, (Default_Argument_Flags | .SHOW_HELP_ON_ERROR) & ~.FREE_ARGUMENTS_ALLOWED);
     if !success exit(1);
+
+    if args.debug {
+        #import "Debug";
+        while !is_debugger_present() {
+            sleep_milliseconds(100);
+        }
+        breakpoint();
+    }
 
     log("Starting http server");
     if !cluster_init() exit(1);

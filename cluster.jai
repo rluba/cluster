@@ -2,11 +2,13 @@
 // - ready-signal from instances
 // - maybe increase/decrease instance count
 // - start a timer event when we kill the old generation so that we don’t have to wait for other events to occur to check shutdown_timeout_ms
+// - optionally wait a certain time before restarting a cluster instance
 
 Args :: struct {
     n: int = 1;
     working_directory: string;
     shutdown_timeout_ms: u32 = 30_000;
+    // restart_delay_ms: u32 = 100;
 }
 
 Instance_Id :: struct {
@@ -327,9 +329,9 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
 
         if !cluster_socket {
             log("Creating new socket in the cluster parent for %:%", message.address, message.port);
-            s := cluster_listen(message.address, message.port);
+            s, error_code := cluster_listen(message.address, message.port);
             if s == INVALID_SOCKET {
-                send_error(instance, errno());
+                send_error(instance, error_code);
                 return;
             }
 
@@ -350,16 +352,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         for cluster_socket.instance_sockets {
             if it.instance_id == instance.id {
                 error_code: s32 = EADDRINUSE;
-                flags: MSG;
-                #if OS == .LINUX {
-                    flags |= .NOSIGNAL;
-                }
-                bytes_sent := repeat_if_interrupted(send(handle, *error_code, size_of(type_of(error_code)), flags));
-                if bytes_sent != size_of(type_of(error_code)) {
-                    error_value, error_string := System.get_error_value_and_string();
-                    log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
-                    finish(instance, kill = true, reap = true);
-                }
+                send_error(instance, error_code);
                 return;
             }
         }
