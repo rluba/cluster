@@ -319,8 +319,10 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
             return false;
         }
 
-        for i: 0..group.poll_fds.count-1 {
-            it := group.poll_fds[i];
+        poll_fds := group.poll_fds; // Make a copy in case someone modifies this in a callback while we’re iterating
+
+        for i: 0..poll_fds.count-1 {
+            it := poll_fds[i];
             handle := it.fd;
             if !it.revents continue;
 

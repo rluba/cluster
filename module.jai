@@ -156,7 +156,7 @@ send_socket :: (ipc: Socket, socket_to_send: Socket, buffer: [] u8) -> success: 
     message_header.msg_iov = *iov;
     message_header.msg_iovlen = 1;
     message_header.msg_control = *control_message;
-    message_header.msg_controllen = size_of(type_of(control_message));
+    message_header.msg_controllen = control_message.header.cmsg_len;
 
 
     flags: MSG;
@@ -201,7 +201,7 @@ receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_rec
 
     // We’ll either receive a dummy message with ancillary data or we’ll receive an error code without ancillary data.
     bytes_received := repeat_if_interrupted(recvmsg(s, *message_header, 0));
-    log("Socket bytes received: %, header: %", bytes_received, message_header);
+    // log("Socket bytes received: %, header: %", bytes_received, message_header);
     if bytes_received == -1 {
         error_value, error_string := System.get_error_value_and_string();
         log_error("Could not receive from cluster parent: % %", error_value, error_string);
@@ -217,15 +217,13 @@ receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_rec
             return false, INVALID_SOCKET, bytes_received, error_value;
         }
 
-        if received.cmsg_len < size_of(type_of(control_message)) {
+        if received.cmsg_len < CMSG_LEN(size_of(type_of(control_message.socket))) {
             log_error("Socket message from the child is too small");
             return false, INVALID_SOCKET, bytes_received, -1;
         }
 
         received_message := cast(*Control_Message_Socket) received;
         socket := received_message.socket;
-
-        log("Received socket! Sending ACK");
 
         // Doesn’t matter what we write, it’s just to tell the parent that we’ve received the handle, so it can close it in its process and proceed.
         bytes_sent := repeat_if_interrupted(send(s, *read_value, 1, 0));
@@ -235,8 +233,6 @@ receive_socket :: (s: Socket, buffer: [] u8) -> success: bool, Socket, bytes_rec
             close(socket);
             return false, INVALID_SOCKET, bytes_received, error_value;
         }
-
-        log("Sent ACK");
 
         return true, socket, bytes_received, 0;
     } else {
