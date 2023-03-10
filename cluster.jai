@@ -98,7 +98,7 @@ main :: () {
     if !success exit(1);
 
     sa: sigaction_t;
-    // Instead of ignoring, we have to define a no-op signal handler because SIG_IGN is inherited by child processes, but signal handlers are not
+    // Instead of ignoring, we have to define a no-op signal handler because SIG_IGN is inherited by child processes, but signal handlers are not.
     // WTF, fork(), really?!?!
     sa.sa_handler = ignore_signal;
     sigemptyset(*sa.sa_mask);

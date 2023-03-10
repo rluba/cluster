@@ -128,8 +128,6 @@ add_signals :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Gro
                 return false;
             }
 
-            log("Created handle % for signal %", handle, it);
-
             table_add(*group.signals_by_handle, handle, it);
 
             fd: pollfd;
@@ -333,9 +331,7 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
 
             signal := table_find_pointer(*group.signals_by_handle, handle);
             if signal {
-                log("Signal event: % -> %", handle, <<signal);
-                // Clear the signal event by reading
-                had_info := false;
+                // Clear the signal event by reading the signal info
                 while true {
                     info: signalfd_siginfo;
                     bytes_read := repeat_if_interrupted(read(handle, *info, size_of(type_of(info))));
@@ -348,16 +344,10 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
                         }
                         break;
                     }
-                    had_info = true;
                 }
 
-                if had_info {
-                    handler := table_find_pointer(*group.signal_handlers, <<signal);
-                    if handler handler.callback(group, <<signal, handler.data);
-                } else {
-                    log_error("Received signal event but there was no signal info to read.");
-                    success = false;
-                }
+                handler := table_find_pointer(*group.signal_handlers, <<signal);
+                if handler handler.callback(group, <<signal, handler.data);
             } else {
                 event_id := cast(User_Event_Id) handle;
                 handler := table_find_pointer(*group.user_handlers, event_id);
@@ -441,13 +431,6 @@ close_and_reset_fd :: (fd: *s32, loc := #caller_location) {
         sig_mask: sigset_t;
         sigemptyset(*sig_mask);
         sigaddset(*sig_mask, signal);
-
-        result := sigprocmask(SIG_BLOCK, *sig_mask, null);
-        if result == -1 {
-            error_code, error_string := System.get_error_value_and_string();
-            log_error("Couldn’t set sigprocmask for event %: % %", signal, error_code, error_string);
-            return -1, false;
-        }
 
         handle := signalfd(-1, *sig_mask, SFD_NONBLOCK);
         if handle == -1 {
