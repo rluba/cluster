@@ -576,8 +576,6 @@ find_instance :: (id: Instance_Id) -> *Cluster_Instance {
     return null;
 }
 
-#load "wait.jai";
-
 #import,file "module.jai";
 
 #import "Basic";
@@ -587,3 +585,6 @@ find_instance :: (id: Instance_Id) -> *Cluster_Instance {
 #import "Socket";
 #import "String";
 System :: #import "System";
+
+#import "wait_group"; // https://github.com/rluba/wait_group
+#import "POSIX";
