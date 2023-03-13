@@ -85,6 +85,9 @@ close_instance_socket :: (cs: *Cluster_Socket, instance: *Cluster_Instance) {
 }
 
 main :: () {
+    // context.logger = cluster_logger;
+    context.print_style.struct_printer = cluster_struct_printer;
+
     success, args, is_set, command_args := parse_arguments(Args, Default_Argument_Flags | .SHOW_HELP_ON_ERROR);
     if !success exit(1);
     if !command_args {
@@ -204,7 +207,7 @@ maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
         log_error("Could not check status of cluster instance %.", instance.id);
         finish(instance, kill = true, reap = false); // reaping has failed, no need to try again?
     } else if process_result.type != .STILL_RUNNING {
-        log_error("Cluster instance % seems to have stopped. Result: %", instance.id, process_result);
+        log("Cluster instance % has stopped: %", instance.id, process_result);
         finish(instance, kill = false, reap = false);
     }
     // @ToDo: Maybe only give it a certain time to exit after EOF and kill if it doesn’t respond?
@@ -241,7 +244,7 @@ handle_signal :: (group: *Wait_Group, signal: s32, data: *void) {
                 log_error("Received % while gacefully shutting down. Exiting immediately.", name);
                 exit(1);
             } else {
-                log_error("Received %. Shutting down gacefully…", name);
+                log("Received %. Shutting down gacefully…", name);
                 should_quit = true;
                 array_add(*legacy_instances, ..instances);
                 array_resize(*instances, 0);
@@ -497,7 +500,7 @@ log_lines :: (instance: *Cluster_Instance, lines_string: string, to_standard_err
     if !lines_string return;
     lines := split(lines_string, cast(u8) #char "\n");
     for lines {
-        log("[%]: %", instance.id, it, flags = ifx to_standard_error then Log_Flags.ERROR else 0);
+        log("%: %", instance.id, it, flags = ifx to_standard_error then Log_Flags.ERROR else 0, user_flags = 1);
     }
 }
 
@@ -580,6 +583,41 @@ find_instance :: (id: Instance_Id) -> *Cluster_Instance {
     return null;
 }
 
+cluster_struct_printer :: (builder: *String_Builder, any: Any, struct_printer_data: *void) -> bool {
+    if any.type == type_info(Instance_Id) {
+        id := cast(*Instance_Id) any.value_pointer;
+        print_to_builder(builder, "[%/%]", id.generation, id.id);
+        return true;
+    }
+
+    return false;
+}
+
+// cluster_logger :: (message: string, data: *void, info: Log_Info) {
+//     if !message return;
+
+
+//     to_standard_error := false;
+//     color := Console_Color.HI_BLACK;
+//     if info.user_flags {
+//         color = .BLACK;
+//     }
+//     if info.common_flags & .ERROR {
+//         color = .RED;
+//         to_standard_error = true;
+//     }
+
+//     colored_message := tprint("\e[0;%m%\e[0;m", cast(s32) color, message);
+
+//     if message[message.count-1] != #char "\n" {
+//         write_strings(colored_message, "\n", to_standard_error = to_standard_error);
+//     } else {
+//         write_string(colored_message, to_standard_error = to_standard_error);
+//     }
+// }
+
+
+
 #import,file "module.jai";
 
 #import "Basic";
@@ -592,3 +630,4 @@ System :: #import "System";
 
 #import "wait_group"; // https://github.com/rluba/wait_group
 #import "POSIX";
+// #import "Print_Color";
