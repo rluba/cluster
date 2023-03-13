@@ -3,6 +3,7 @@ Args :: struct {
     noint: bool;
     debug: bool;
 }
+
 main :: () {
     success, args, is_set, command_args := parse_arguments(Args, (Default_Argument_Flags | .SHOW_HELP_ON_ERROR) & ~.FREE_ARGUMENTS_ALLOWED);
     if !success exit(1);
