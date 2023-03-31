@@ -586,7 +586,7 @@ find_instance :: (id: Instance_Id) -> *Cluster_Instance {
 cluster_struct_printer :: (builder: *String_Builder, any: Any, struct_printer_data: *void) -> bool {
     if any.type == type_info(Instance_Id) {
         id := cast(*Instance_Id) any.value_pointer;
-        print_to_builder(builder, "[%/%]", id.generation, id.id);
+        print_to_builder(builder, "[%-%]", id.generation, id.id);
         return true;
     }
 
