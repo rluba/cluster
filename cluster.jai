@@ -413,18 +413,18 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         // Must be a close on the cluster_socket IPC?
         log("Pretending to handle cluster socket IPC event on intstance %: % %", instance.id, handle, is_eof);
     }
+}
 
-    send_error :: (instance: *Cluster_Instance, error_code: s32) {
-        flags: MSG;
-        #if OS == .LINUX {
-            flags |= .NOSIGNAL;
-        }
-        bytes_sent := repeat_if_interrupted(send(instance.process.input.handle, *error_code, size_of(type_of(error_code)), flags));
-        if bytes_sent != size_of(type_of(error_code)) {
-            error_value, error_string := System.get_error_value_and_string();
-            log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
-            finish(instance, kill = true, reap = true);
-        }
+send_error :: (instance: *Cluster_Instance, error_code: s32) {
+    flags: MSG;
+    #if OS == .LINUX {
+        flags |= .NOSIGNAL;
+    }
+    bytes_sent := repeat_if_interrupted(send(instance.process.input.handle, *error_code, size_of(type_of(error_code)), flags));
+    if bytes_sent != size_of(type_of(error_code)) {
+        error_value, error_string := System.get_error_value_and_string();
+        log_error("Could not send error code to cluster instance %: % %", instance.id, error_value, error_string);
+        finish(instance, kill = true, reap = true);
     }
 }
 
