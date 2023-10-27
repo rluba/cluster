@@ -43,9 +43,11 @@ Cluster_Socket :: struct {
     }
 }
 
-should_quit := false;
-current_generation := 0;
-wait_for_new_generation := false;
+should_quit               := false;
+quit_exit_code:           s32;
+current_generation        := 0;
+wait_for_first_generation := false;
+wait_for_new_generation   := false;
 
 wait_group: Wait_Group;
 instances: [..] *Cluster_Instance;
@@ -120,6 +122,7 @@ main :: () {
     log("Creating a cluster of % instances of: %", wanted_instance_count, get_quoted_command_string(command_args));
 
     exit_on_failure := true;
+    wait_for_first_generation = true;
 
     array_resize(*instances, wanted_instance_count);
     for * instances {
@@ -149,6 +152,7 @@ main :: () {
 
         for instances {
             maybe_reap_instance(it);
+            if should_quit continue;
 
             if !it.process.pid {
                 log("Starting cluster instance %…", it.id);
@@ -185,6 +189,8 @@ main :: () {
             }
         }
 
+        if should_quit && !legacy_instances break;
+
         exit_on_failure = false;
 
         success := wait_for_events(*wait_group);
@@ -196,6 +202,7 @@ main :: () {
     }
 
     deinit(*wait_group);
+    if quit_exit_code exit(quit_exit_code);
 }
 
 maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
@@ -209,6 +216,15 @@ maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
     } else if process_result.type != .STILL_RUNNING {
         log("Cluster instance % has stopped: %", instance.id, process_result);
         finish(instance, kill = false, reap = false);
+
+        if wait_for_first_generation {
+            // If the first generation stops before it became healthy, something is off. Stop the cluster!
+            // @ToDo: Maybe we want to allow for them to fail for a certain time period initially? Might be necessary if there are some interdependencies between services and we don’t want to enforce a strict bringup order.
+            log_error("First generation did not come up successfully. Exiting!");
+            wait_for_first_generation = false;
+            quit_exit_code = process_result.exit_code;
+            should_quit = true;
+        }
     }
     // @ToDo: Maybe only give it a certain time to exit after EOF and kill if it doesn’t respond?
     return true;
@@ -401,17 +417,21 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         entry.socket = sockets[0];
         array_add(*cluster_socket.instance_sockets, entry);
         log("Added cluster instance % to socket for %:%", instance.id, message.address, message.port);
+        if wait_for_first_generation {
+            wait_for_first_generation = false;
+            log("First instance from generation % came online. Cluster is considered healthy.", instance.id.generation, flags = .VERBOSE_ONLY);
+        }
         if wait_for_new_generation {
+            wait_for_new_generation = false;
             // @ToDo: We should introduce a "ready" signal from the children instead of implicitly assuming that children are ready on first listen
             // Otherwise we never stop old instances if the child process doesn’t listen on anything.
             // Also we would start killing the old onces too early if the child has to listen to more than one socket before it’s ready.
             log("First instance from generation % came online. Stopping old generation.", instance.id.generation, flags = .VERBOSE_ONLY);
-            wait_for_new_generation = false;
             stop_legacy_instances();
         }
     } else {
         // Must be a close on the cluster_socket IPC?
-        log("Pretending to handle cluster socket IPC event on intstance %: % %", instance.id, handle, is_eof);
+        log("@Incomplete: Pretending to handle cluster socket IPC event on intstance %: % %", instance.id, handle, is_eof);
     }
 }
 
