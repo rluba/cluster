@@ -419,14 +419,14 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster
         log("Added cluster instance % to socket for %:%", instance.id, message.address, message.port);
         if wait_for_first_generation {
             wait_for_first_generation = false;
-            log("First instance from generation % came online. Cluster is considered healthy.", instance.id.generation, flags = .VERBOSE_ONLY);
+            log("First instance of generation % came online. Cluster is considered healthy.", instance.id.generation, flags = .VERBOSE_ONLY);
         }
         if wait_for_new_generation {
             wait_for_new_generation = false;
             // @ToDo: We should introduce a "ready" signal from the children instead of implicitly assuming that children are ready on first listen
             // Otherwise we never stop old instances if the child process doesn’t listen on anything.
             // Also we would start killing the old onces too early if the child has to listen to more than one socket before it’s ready.
-            log("First instance from generation % came online. Stopping old generation.", instance.id.generation, flags = .VERBOSE_ONLY);
+            log("First instance of generation % came online. Stopping old generation.", instance.id.generation, flags = .VERBOSE_ONLY);
             stop_legacy_instances();
         }
     } else {
