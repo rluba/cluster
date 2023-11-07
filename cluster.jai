@@ -288,7 +288,8 @@ stop_legacy_instances :: () {
     }
 }
 
-handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster_Instance) {
+handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, event: Wait_Event_Type, instance: *Cluster_Instance) {
+    assert(event == .READ);
     success := false;
     if handle == instance.process.output.handle {
         buffer := ensure_contiguous_space_and_return_available_range(*instance.output_builder);
@@ -318,7 +319,8 @@ handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Clus
     }
 }
 
-handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, instance: *Cluster_Instance) {
+handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event: Wait_Event_Type, instance: *Cluster_Instance) {
+    assert(event == .READ);
     if handle == instance.process.input.handle {
         if is_eof return;
 
@@ -448,7 +450,8 @@ send_error :: (instance: *Cluster_Instance, error_code: s32) {
     }
 }
 
-handle_cluster_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, data: *void) {
+handle_cluster_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event: Wait_Event_Type, data: *void) {
+    assert(event == .READ);
     // log("Received event on socket %", handle, flags = .VERBOSE_ONLY);
     cluster_socket: *Cluster_Socket;
     for * cluster_sockets {
