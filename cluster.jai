@@ -100,7 +100,7 @@ main :: () {
     success = cluster_init();
     if !success exit(1);
 
-    success = init(*wait_group);
+    success = init(*wait_group, verbose = false);
     if !success exit(1);
 
     // Instead of ignoring, we have to define a no-op signal handler because SIG_IGN is inherited by child processes, but signal handlers are not.
@@ -319,10 +319,10 @@ handle_output :: (group: *Wait_Group, handle: s32, is_eof: bool, event: Wait_Eve
     }
 }
 
-handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event: Wait_Event_Type, instance: *Cluster_Instance) {
-    assert(event == .READ);
+handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_Event_Type, instance: *Cluster_Instance) {
+    assert(event_type == .READ);
     if handle == instance.process.input.handle {
-        if is_eof return;
+        if is_eof log("Got EOF for the cluster socker IPC on instance %", instance.id, flags = .VERBOSE_ONLY);
 
         message: Message_Listen;
         message_size := size_of(type_of(message));
@@ -333,6 +333,8 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event: Wait_Event_
             finish(instance, kill = true, reap = true);
             return;
         }
+
+        if bytes_received == 0 return; // This was probably the EOF read. We are going to ignore this on the IPC socket for now and wait for the EOFs on the output handles.
 
         assert(bytes_received == message_size, "Received unexpected number of IPC bytes from cluster instance %: % vs %", instance.id, bytes_received, message_size);
         log("Received listen from cluster instance %: %:%", instance.id, message.address, message.port);
