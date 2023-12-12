@@ -99,6 +99,7 @@ main :: () {
 
     success = cluster_init();
     if !success exit(1);
+    is_cluster_instance = false; // Even if "cluster" is spawned by someone else, we consider ourselves to be the cluster host.
 
     success = init(*wait_group, verbose = false);
     if !success exit(1);
