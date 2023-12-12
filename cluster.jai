@@ -215,7 +215,8 @@ maybe_reap_instance :: (instance: *Cluster_Instance) -> bool {
         log_error("Could not check status of cluster instance %.", instance.id);
         finish(instance, kill = true, reap = false); // reaping has failed, no need to try again?
     } else if process_result.type != .STILL_RUNNING {
-        log("Cluster instance % has stopped: %", instance.id, process_result);
+        prefix := ifx instance.id.generation == current_generation then "CURRENT" else "Old";
+        log("% cluster instance % has stopped: %", prefix, instance.id, process_result);
         finish(instance, kill = false, reap = false);
 
         if wait_for_first_generation {
