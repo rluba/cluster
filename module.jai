@@ -25,9 +25,10 @@ cluster_init :: () -> bool {
     return true;
 }
 
-cluster_listen :: (address: u32, port: u16) -> Socket, error_code: s32 {
+cluster_listen :: (type: Address_Type, address: Address, port: u16) -> Socket, error_code: s32 {
     if is_cluster_instance {
         message: Message_Listen;
+        message.type = type;
         message.address = address;
         message.port    = port;
         message_size := size_of(type_of(message));
@@ -46,7 +47,76 @@ cluster_listen :: (address: u32, port: u16) -> Socket, error_code: s32 {
         return socket, 0;
     } else {
         // Do the normal socket stuff
-        // @ToDo: IPv6
+        // @ToDo: optionally restrict interface
+        s: Socket;
+        if #complete type == {
+            case .IPV4; s = socket(AF_INET,  .STREAM, 0);
+            case .IPV6; s = socket(AF_INET6, .STREAM, 0);
+        }
+        if s == INVALID_SOCKET {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t create socket: % %", error_code, error_string);
+            return INVALID_SOCKET, error_code;
+        }
+
+        reuse_addr: s32 = 1;
+        result := setsockopt(s, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t set socket options: % %", error_code, error_string);
+            close_and_reset(*s);
+            return INVALID_SOCKET, error_code;
+        }
+
+        if #complete type == {
+            case .IPV4; result = bind(s, address.v4, port);
+            case .IPV6; result = bind(s, address.v6, port);
+        }
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t bind socket: % %", error_code, error_string);
+            close_and_reset(*s);
+            return INVALID_SOCKET, error_code;
+        }
+
+        result = listen(s, SOMAXCONN);
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t listen on socket: % %", error_code, error_string);
+            close_and_reset(*s);
+            return INVALID_SOCKET, error_code;
+        }
+
+        return s, 0;
+    }
+}
+
+cluster_listen :: (address: u32, port: u16) -> Socket, error_code: s32 {
+    if is_cluster_instance {
+        message: Message_Listen;
+        message.type = .IPV4;
+        message.address.v4 = address;
+        message.port    = port;
+        message_size := size_of(type_of(message));
+        bytes_sent := repeat_if_interrupted(send(cluster_socket, *message, cast(u64) message_size, 0));
+        if bytes_sent != message_size {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t send listen message: % %", error_code, error_string);
+            return INVALID_SOCKET, error_code;
+        }
+
+        buffer: [4] u8;
+        success, socket, bytes_received, error_code := receive_socket(cluster_socket, buffer);
+        if !success return INVALID_SOCKET, error_code;
+
+        return socket, 0;
+    } else {
+        // Do the normal socket stuff
         // @ToDo: optionally restrict interface
         s := socket(AF_INET, .STREAM, 0);
         if s == INVALID_SOCKET {
@@ -88,9 +158,72 @@ cluster_listen :: (address: u32, port: u16) -> Socket, error_code: s32 {
     }
 }
 
-cluster_accept :: (s: Socket) -> Socket, sockaddr_in {
+cluster_listen :: (address: [16] u8, port: u16) -> Socket, error_code: s32 {
     if is_cluster_instance {
-        buffer: [size_of(sockaddr_in)] u8;
+        message: Message_Listen;
+        message.type = .IPV6;
+        message.address.v6 = address;
+        message.port    = port;
+        message_size := size_of(type_of(message));
+        bytes_sent := repeat_if_interrupted(send(cluster_socket, *message, cast(u64) message_size, 0));
+        if bytes_sent != message_size {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t send listen message: % %", error_code, error_string);
+            return INVALID_SOCKET, error_code;
+        }
+
+        buffer: [4] u8;
+        success, socket, bytes_received, error_code := receive_socket(cluster_socket, buffer);
+        if !success return INVALID_SOCKET, error_code;
+
+        return socket, 0;
+    } else {
+        // Do the normal socket stuff
+        // @ToDo: optionally restrict interface
+        s := socket(AF_INET6, .STREAM, 0);
+        if s == INVALID_SOCKET {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t create socket: % %", error_code, error_string);
+            return INVALID_SOCKET, error_code;
+        }
+
+        reuse_addr: s32 = 1;
+        result := setsockopt(s, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t set socket options: % %", error_code, error_string);
+            close_and_reset(*s);
+            return INVALID_SOCKET, error_code;
+        }
+
+        result = bind(s, address, port);
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t bind socket: % %", error_code, error_string);
+            close_and_reset(*s);
+            return INVALID_SOCKET, error_code;
+        }
+
+        result = listen(s, SOMAXCONN);
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t listen on socket: % %", error_code, error_string);
+            close_and_reset(*s);
+            return INVALID_SOCKET, error_code;
+        }
+
+        return s, 0;
+    }
+}
+
+cluster_accept :: (type: Address_Type, s: Socket) -> Socket, Socket_Address {
+    if is_cluster_instance {
+        buffer: [size_of(Socket_Address)] u8;
         success, socket, bytes_received := receive_socket(s, buffer);
         if !success {
             log_error("Could not receive socket");
@@ -102,11 +235,21 @@ cluster_accept :: (s: Socket) -> Socket, sockaddr_in {
             return INVALID_SOCKET, .{};
         }
 
-        address := <<cast(*sockaddr_in)buffer.data;
+        address := <<cast(*Socket_Address) buffer.data;
+        assert(address.type == type, "Socket accepted address type mismatch: % vs %", address.type, type);
         return socket, address;
     } else {
-        client_socket, client_addr := accept(s);
-        return client_socket, client_addr;
+        if #complete type == {
+            case .IPV4;
+                client_socket, sock_address := accept(s);
+                address := socket_address(sock_address);
+                return client_socket, address;
+
+            case .IPV6;
+                client_socket, sock_address := accept_v6(s);
+                address := socket_address(sock_address);
+                return client_socket, address;
+        }
     }
 }
 
@@ -114,11 +257,73 @@ cluster_close :: (s: Socket) -> s32 {
     return close(s);
 }
 
-// Request listening from the child to the parent
-Message_Listen :: struct {
-    address: u32;
-    port:    u16;
+Address_Type :: enum u8 {
+    IPV4 :: 4;
+    IPV6 :: 6;
 }
+
+Address :: union {
+    v4: u32;
+    v6: [16] u8;
+}
+
+Socket_Address :: struct {
+    type:    Address_Type;
+    port:    u16;
+    address: Address;
+}
+
+socket_address :: (addr: sockaddr_in) -> Socket_Address {
+    result: Socket_Address;
+    result.type = .IPV4;
+    result.port = addr.sin_port;
+    #if OS == .WINDOWS {
+        result.address.v4 = ntohl(addr.sin_addr.S_un.S_addr);
+    } else {
+        result.address.v4 = ntohl(addr.sin_addr.s_addr);
+    }
+    return result;
+}
+
+socket_address :: (addr: sockaddr_in6) -> Socket_Address {
+    result: Socket_Address;
+    result.type = .IPV6;
+    result.port = addr.sin6_port;
+    #if OS == .WINDOWS {
+        result.address.v6 = addr.sin6_addr.u.Byte;
+    } else #if OS == .MACOS {
+        result.address.v6 = addr.sin6_addr.__u6_addr.__u6_addr8;
+    } else #if OS == .LINUX {
+        result.address.v6 = addr.sin6_addr.__in6_u.__u6_addr8;
+    } else {
+        #assert(false, "Unsupported OS");
+    }
+    return result;
+}
+
+format_address :: (type: Address_Type, address: Address) -> string {
+    builder: String_Builder;
+    append(*builder, type, address);
+    return builder_to_string(*builder);
+}
+
+format_address :: (address: Socket_Address) -> string {
+    builder: String_Builder;
+    append(*builder, address.type, address.address);
+    print_to_builder(*builder, ":%", address.port);
+    return builder_to_string(*builder);
+}
+
+append :: (builder: *String_Builder, type: Address_Type, address: Address) {
+    if #complete type == {
+        case .IPV4; append_address(builder, address.v4);
+        case .IPV6; append_address(builder, address.v6);
+    }
+}
+
+
+// Request listening from the child to the parent
+Message_Listen :: Socket_Address;
 
 // Transfer socket from the parent to the child
 Control_Message_Socket :: struct {

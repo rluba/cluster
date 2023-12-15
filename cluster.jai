@@ -31,8 +31,9 @@ Cluster_Instance :: struct {
 }
 
 Cluster_Socket :: struct {
-    address:             u32;
+    type:                Address_Type;
     port:                u16;
+    address:             Address;
     socket:              Socket = INVALID_SOCKET;
     instance_sockets:    [..] Instance_Socket;
     next_instance_index: int;
@@ -339,7 +340,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_E
         if bytes_received == 0 return; // This was probably the EOF read. We are going to ignore this on the IPC socket for now and wait for the EOFs on the output handles.
 
         assert(bytes_received == message_size, "Received unexpected number of IPC bytes from cluster instance %: % vs %", instance.id, bytes_received, message_size);
-        log("Received listen from cluster instance %: %:%", instance.id, message.address, message.port);
+        log("Received listen from cluster instance %: %:%", instance.id, format_address(message.type, message.address), message.port);
 
         if (instance.id.generation != current_generation) {
             // This generation is supposed to shut down, not start listening on new sockets
@@ -350,15 +351,15 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_E
         cluster_socket: *Cluster_Socket;
         found := false;
         for * cluster_sockets {
-            if it.address == message.address && it.port == message.port {
+            if is_same_address(it.type, it.address, message.type, message.address) && it.port == message.port {
                 cluster_socket = it;
                 break;
             }
         }
 
         if !cluster_socket {
-            log("Creating new socket in the cluster parent for %:%", message.address, message.port);
-            s, error_code := cluster_listen(message.address, message.port);
+            log("Creating new socket in the cluster parent for %:%", format_address(message.type, message.address), message.port);
+            s, error_code := cluster_listen(message.type, message.address, message.port);
             if s == INVALID_SOCKET {
                 send_error(instance, error_code);
                 return;
@@ -366,6 +367,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_E
 
             log("Created cluster parent socket %", s, flags = .VERBOSE_ONLY);
             cluster_socket = find_and_occupy_empty_slot(*cluster_sockets);
+            cluster_socket.type = message.type;
             cluster_socket.address = message.address;
             cluster_socket.port = message.port;
             cluster_socket.socket = s;
@@ -422,7 +424,7 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_E
         entry.instance_id = instance.id;
         entry.socket = sockets[0];
         array_add(*cluster_socket.instance_sockets, entry);
-        log("Added cluster instance % to socket for %:%", instance.id, message.address, message.port);
+        log("Added cluster instance % to socket for %:%", instance.id, format_address(message.type, message.address), message.port);
         if wait_for_first_generation {
             wait_for_first_generation = false;
             log("First instance of generation % came online. Cluster is considered healthy.", instance.id.generation, flags = .VERBOSE_ONLY);
@@ -438,6 +440,14 @@ handle_ipc :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_E
     } else {
         // Must be a close on the cluster_socket IPC?
         log("@Incomplete: Pretending to handle cluster socket IPC event on intstance %: % %", instance.id, handle, is_eof);
+    }
+}
+
+is_same_address :: (a_type: Address_Type, a: Address, b_type: Address_Type, b: Address) -> bool {
+    if a_type != b_type return false;
+    if #complete a_type == {
+        case .IPV4; return a.v4 == b.v4;
+        case .IPV6; return memcmp(a.v6.data, b.v6.data, a.v6.count) == 0;
     }
 }
 
@@ -471,7 +481,18 @@ handle_cluster_socket_event :: (group: *Wait_Group, handle: s32, is_eof: bool, e
         return;
     }
 
-    client_socket, address := accept(handle);
+    client_socket: Socket = ---;
+    address: Socket_Address = ---;
+    if #complete cluster_socket.type == {
+        case .IPV4;
+            client_socket=, sock_address := accept(handle);
+            address = socket_address(sock_address);
+
+        case .IPV6;
+            client_socket=, sock_address := accept_v6(handle);
+            address = socket_address(sock_address);
+    }
+    assert(address.type == cluster_socket.type, "Mismatching address type: % vs %", address.type, cluster_socket.type);
     if client_socket == INVALID_SOCKET {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Couldn’t accept on socket: % %", error_code, error_string);
