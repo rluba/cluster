@@ -536,7 +536,7 @@ maybe_log :: (instance: *Cluster_Instance, builder: *String_Builder, buffer: [] 
     partial_line_length := buffer_string.count - last_newline_index - 1;
 
     // @Speed: This is wasteful. We need a better buffer where we can just move stuff around instead of re-allocating
-    everything := builder_to_string(builder, allocator = temp);
+    everything := builder_to_string(builder,, temp);
     lines_string := slice(everything, 0, everything.count - partial_line_length - 1); // Omit the final newline
     partial_line := slice(everything, everything.count - partial_line_length, partial_line_length);
     if partial_line append(builder, partial_line);
@@ -599,8 +599,8 @@ finish :: (instance: *Cluster_Instance, kill: bool, reap: bool, exit_timeout_ms 
     deinit(*instance.process);
 
     // Log whatever remained unlogged
-    log_lines(instance, builder_to_string(*instance.output_builder, allocator = temp), to_standard_error = false);
-    log_lines(instance, builder_to_string(*instance.error_builder, allocator = temp),  to_standard_error = true);
+    log_lines(instance, builder_to_string(*instance.output_builder,, temp), to_standard_error = false);
+    log_lines(instance, builder_to_string(*instance.error_builder,, temp),  to_standard_error = true);
 
     reset(instance);
 }
@@ -626,7 +626,7 @@ find_instance :: (id: Instance_Id) -> *Cluster_Instance {
         print_to_builder(*builder, "%", it.id);
     }
     append(*builder, "]");
-    log_error("Could not find cluster instance %. Instances: %", id, builder_to_string(*builder, allocator = temp));
+    log_error("Could not find cluster instance %. Instances: %", id, builder_to_string(*builder,, temp));
     assert(false);
     return null;
 }
