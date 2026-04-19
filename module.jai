@@ -235,7 +235,7 @@ cluster_accept :: (type: Address_Type, s: Socket) -> Socket, Socket_Address {
             return INVALID_SOCKET, .{};
         }
 
-        address := <<cast(*Socket_Address) buffer.data;
+        address := (cast(*Socket_Address) buffer.data).*;
         assert(address.type == type, "Socket accepted address type mismatch: % vs %", address.type, type);
         return socket, address;
     } else {
