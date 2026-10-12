@@ -130,7 +130,7 @@ main :: () {
     for * instances {
         instance := New(Cluster_Instance);
         instance.id = .{current_generation, it_index + 1};
-        <<it = instance;
+        it.* = instance;
     }
 
     while true {
@@ -250,7 +250,7 @@ handle_signal :: (group: *Wait_Group, signal: s32, data: *void) {
             for * instances {
                 instance := New(Cluster_Instance);
                 instance.id = .{current_generation, it_index + 1};
-                <<it = instance;
+                it.* = instance;
             }
 
             // * Wait for the new cluster instances to come online
